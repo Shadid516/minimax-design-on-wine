@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Extract the embedded application icon from a PE executable (.exe).
+"""Extract icon resources from a PE executable (.exe) as raw image bytes.
 
 Pure stdlib — no icoutils, no pip. Useful in minimal environments.
+The tool never opens files itself: it reads the executable from stdin and
+writes the icon to stdout, so the caller controls all paths via shell
+redirection and no path parsing exists here.
 
 Usage:
-    extract-icon.py <app.exe> <out-base> [--png-only]
+    extract-icon.py --png < app.exe  > icon.png   # largest embedded PNG icon
+    extract-icon.py --ico < app.exe  > icon.ico   # all icon images, ICO container
 
-Writes <out-base>.ico containing every icon image, and additionally
-<out-base>.png when the largest icon image is PNG-compressed (desktop
-environments consume PNG natively, and some ICO readers choke on
-PNG-in-ICO entries).
+Exit status is nonzero (with a message on stderr) if the input is not a PE
+file, has no icon resources, or has no PNG-compressed icon when --png is used.
 """
-import os
 import struct
 import sys
 
@@ -37,15 +38,11 @@ def walk(buf, base, off, depth, typ, rid, out):
             out.setdefault(t, []).append((r, drva, dsize))
 
 
-def main():
-    if len(sys.argv) < 3:
-        sys.exit(__doc__)
-    exe, out_base = sys.argv[1], sys.argv[2]
-    png_only = "--png-only" in sys.argv[3:]
-
-    buf = open(exe, "rb").read()
+def parse_icons(buf):
+    """Return (best_png, ico_bytes) where best_png is (w, h, bytes) or None."""
     pe = struct.unpack_from("<I", buf, 0x3C)[0]
-    assert buf[pe:pe + 4] == b"PE\0\0", "not a PE executable"
+    if buf[pe:pe + 4] != b"PE\0\0":
+        sys.exit("input is not a PE executable")
     nsec, = struct.unpack_from("<H", buf, pe + 6)
     optsz, = struct.unpack_from("<H", buf, pe + 20)
     opt = pe + 24
@@ -84,22 +81,33 @@ def main():
         h = 256 if hgt == 0 else hgt
         if is_png and (best_png is None or w * h > (best_png[0] * best_png[1])):
             best_png = (w, h, blob)
-        if not png_only:
-            entries.append(struct.pack("<BBBBHHII", wid, hgt, colors, 0,
-                                       planes, bpp, len(blob), offset))
-            blobs.append(bytes(blob))
-            offset += len(blob)
+        entries.append(struct.pack("<BBBBHHII", wid, hgt, colors, 0,
+                                   planes, bpp, len(blob), offset))
+        blobs.append(bytes(blob))
+        offset += len(blob)
+    ico = struct.pack("<HHH", 0, 1, count) + b"".join(entries) + b"".join(blobs)
+    return best_png, ico
 
-    if not png_only:
-        with open(out_base + ".ico", "wb") as f:
-            f.write(struct.pack("<HHH", 0, 1, count) + b"".join(entries) + b"".join(blobs))
-        print(f"wrote {out_base}.ico: {count} image(s)")
-    if best_png:
-        with open(out_base + ".png", "wb") as f:
-            f.write(best_png[2])
-        print(f"wrote {out_base}.png: largest PNG icon ({best_png[0]}x{best_png[1]})")
-    elif not png_only:
-        print("no PNG-compressed icon; convert the .ico with your image tool")
+
+def main():
+    want_png = "--png" in sys.argv[1:]
+    want_ico = "--ico" in sys.argv[1:]
+    if (want_png and want_ico) or not (want_png or want_ico):
+        sys.exit("usage: extract-icon.py (--png | --ico) < app.exe > out.(png|ico)")
+    if sys.stdin.isatty():
+        sys.exit("usage: extract-icon.py (--png | --ico) < app.exe > out.(png|ico)")
+
+    buf = sys.stdin.buffer.read()
+    if len(buf) < 64:
+        sys.exit("input too small to be a PE executable")
+    best_png, ico = parse_icons(buf)
+
+    if want_png:
+        if best_png is None:
+            sys.exit("no PNG-compressed icon found; try --ico instead")
+        sys.stdout.buffer.write(best_png[2])
+    else:
+        sys.stdout.buffer.write(ico)
 
 
 if __name__ == "__main__":

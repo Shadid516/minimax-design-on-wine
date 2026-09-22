@@ -1,0 +1,78 @@
+#!/bin/sh
+# MiniMax Design preflight for WINE: normalize runtime state left behind by an
+# unclean previous session so the app starts clean. Safe to run repeatedly.
+#
+#   1. Prune index-writer ownership artifacts (writers/, writer-locks/,
+#      candidate-*.json) from every .hilo index-recovery directory. Stale
+#      records make gateways block each other ("index-has-live-owner") which
+#      breaks /api/assets + canvas ("Network Error") and quit.
+#   2. Reset the "Restore circuit breaker" counters (workspaceRestoreHealth in
+#      hub-config-global.json). Under WINE the app can never exit cleanly, so
+#      these counters only ever grow; at >=2 the app shows the "restore
+#      projects?" dialog on every start. Resetting them while the app is
+#      closed keeps the dialog away (workspace indexes are re-derivable).
+#
+# Only runtime/derived state is touched — never project files.
+# Refuses to run while the app is running.
+
+LOG="$HOME/.local/state/minimax-design-preflight.log"
+PREFIX="$HOME/.wine"
+USERDIR="$PREFIX/drive_c/users/$USER"
+STORE="$HOME/.wine/drive_c/users/$USER/AppData/Roaming/@hilo/MiniMax Hub Global/hub-config-global.json"
+
+log() { echo "$(date -Is) $*" >> "$LOG"; }
+mkdir -p "$(dirname "$LOG")"
+
+if pgrep -f "[M]iniMax Design.exe" >/dev/null 2>&1; then
+    log "app is running; preflight skipped"
+    exit 0
+fi
+
+# 1) prune stale index-writer artifacts (search the whole prefix user dir so
+#    projects stored anywhere in the prefix are covered)
+pruned=0
+for kind in writers writer-locks; do
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        rm -rf "$d"
+        pruned=$((pruned + 1))
+    done <<EOF
+$(find "$USERDIR" -type d -name "$kind" -path "*index-recovery*" 2>/dev/null)
+EOF
+done
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    rm -f "$f"
+    pruned=$((pruned + 1))
+done <<EOF
+$(find "$USERDIR" -type f -name "candidate-*.json" -path "*index-recovery*" 2>/dev/null)
+EOF
+
+# 2) reset restore circuit-breaker counters
+state="skipped"
+if [ -f "$STORE" ]; then
+    state=$(python3 - "$STORE" <<'PY'
+import json, os, shutil, sys
+p = sys.argv[1]
+try:
+    with open(p) as f:
+        d = json.load(f)
+except Exception as e:
+    print(f"store-unreadable: {e}")
+    sys.exit(0)
+m = d.get("workspaceRestoreHealth") or {}
+if not m:
+    print("already-clean")
+    sys.exit(0)
+shutil.copy2(p, p + ".preflight-bak")
+d["workspaceRestoreHealth"] = {}
+tmp = p + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(d, f, ensure_ascii=False)
+os.replace(tmp, p)
+print("reset:" + ",".join(f"{k}={v}" for k, v in m.items()))
+PY
+)
+fi
+
+log "preflight done: writer-artifacts-removed=$pruned restore-health=$state"

@@ -1,0 +1,41 @@
+#!/bin/sh
+# Keep MiniMax Design's KDE integration wired to the preflight wrapper.
+# Idempotent. Re-run after every app update: wine's winemenubuilder may
+# rewrite the WINE-generated desktop entry and drop the wrapper.
+#
+# Also ensures the launcher used by the user's menu entry calls the preflight.
+# Safe to run anytime; touches only .desktop files and the launcher script.
+
+DESK="$HOME/.local/share/applications/wine/Programs/MiniMax Design.desktop"
+WRAP="$HOME/.local/bin/minimax-design-launch-lnk"
+LOG="$HOME/.local/state/minimax-design-integration.log"
+log() { echo "$(date -Is) $*" >> "$LOG"; }
+mkdir -p "$(dirname "$LOG")"
+
+[ -x "$WRAP" ] || { log "wrapper missing: $WRAP"; exit 1; }
+
+if grep -q "^Exec=.*minimax-design-launch-lnk" "$DESK" 2>/dev/null; then
+    log "desktop entry already routed through wrapper"
+else
+    [ -f "$DESK" ] || { log "desktop entry not found (app updated? reinstall): $DESK"; exit 0; }
+    cp -a "$DESK" "$DESK.bak-$$" 2>/dev/null
+    python3 - "$DESK" "$WRAP" <<'PY'
+import sys
+desk, wrap = sys.argv[1], sys.argv[2]
+with open(desk) as f:
+    lines = f.read().splitlines()
+out = []
+for ln in lines:
+    out.append(f"Exec={wrap}" if ln.startswith("Exec=") else ln)
+with open(desk, "w") as f:
+    f.write("\n".join(out) + "\n")
+print("rewrote Exec")
+PY
+    log "desktop entry routed through wrapper (backup: $DESK.bak-$$)"
+fi
+
+# Menu entries the user may launch from: make sure they resolve to the wrapper
+# (the user's own entry runs ~/.local/bin/minimax-design, which runs preflight).
+command -v update-desktop-database >/dev/null && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null
+command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 >/dev/null 2>&1
+log "integration fix complete"

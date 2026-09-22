@@ -1,0 +1,9 @@
+#!/bin/sh
+# Launcher for the WINE-generated desktop entry (also used by KDE session
+# restore at login). Runs the preflight state normalizer, then starts the app
+# via its own Windows shortcut, exactly as the original desktop entry did.
+[ -x "$HOME/.local/bin/minimax-design-preflight" ] && "$HOME/.local/bin/minimax-design-preflight"
+cd "$HOME/.wine/drive_c/users/$USER/AppData/Local/Programs/MiniMax Design/current" 2>/dev/null || true
+exec env WINEPREFIX="$HOME/.wine" \
+    wine "C:\\users\\$USER\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\MiniMax Design.lnk" \
+    </dev/null >/dev/null 2>&1
